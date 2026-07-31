@@ -2,7 +2,7 @@
 <package >
   <metadata>
     <id>Sharkable</id>
-    <version>0.7.5</version>
+    <version>0.7.6</version>
     <title>Sharkable</title>
     <authors>charleypeng</authors>
     <readme>docs\README.md</readme>

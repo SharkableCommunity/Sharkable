@@ -2,7 +2,7 @@
 
 All notable changes to Sharkable are documented here.
 
-## [Unreleased]
+## [0.7.6] — 2026-08-01
 
 ### fix
 - Idempotency: fingerprint is now computed from a buffered request body **before** the handler runs, so replaying a body-carrying request returns the cached response instead of a spurious `422 idempotency_key_conflict` (BUG-101).

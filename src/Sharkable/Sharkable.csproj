@@ -3,8 +3,8 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Description>🌈Powerful tools for dotnet aot and more</Description>
-    <AssemblyVersion>0.7.5</AssemblyVersion>
-    <Version>0.7.5</Version>
+    <AssemblyVersion>0.7.6</AssemblyVersion>
+    <Version>0.7.6</Version>
     <PackageIcon>sharkable.jpg</PackageIcon>
     <PackageReleaseNotes>Plugin system: ISharkPlugin with 3 lifecycle hooks, 3 discovery paths (assembly/folder/manual), per-folder AssemblyLoadContext isolation. Framework audit fixes: AuditLogBuffer/CronScheduler disposal, unified ResponseSizeExceededException, exception handler repositioned. API consistency: ISagaExecutor interface, CronLockTtl on ICronScheduler, ConfigureJwt -> JwtOptions pattern, ConfigureAuthorization -> method, ICronJobStore default impl, sealed classes, dead code removal. Product: health checks default true, cron concurrency -> SkipIfRunning, WrapSchemaFactory startup warning. 15 features: security headers middleware, framework metrics (ISharkMetrics), IAuditSink, [SharkRateLimit]/[SharkIdempotent]/[SharkCacheProfile] attributes, request-timeout DSL, ValidationErrorMode, parallel warmup, Sharkable.Testing package, GroupConvention/EndpointConvention, OpenAPI ergonomics, IApiKeyValidator.</PackageReleaseNotes>
     <PackageProjectUrl>https://sharkableio.github.io/</PackageProjectUrl>
