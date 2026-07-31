@@ -13,11 +13,25 @@ public sealed class CronScheduler : ICronScheduler
     // one lock. The previous design had TOCTOU gaps where Register could
     // mutate _expressions and _jobs but a concurrent GetDueJobsAsync
     // could read the partial state between the two writes.
-    private sealed record JobEntry(CronJob Job, CronJobState State, CronExpression Expression);
+    private sealed class JobEntry(CronJob Job, CronJobState State, CronExpression Expression)
+    {
+        public CronJob Job { get; } = Job;
+        public CronJobState State { get; } = State;
+        public CronExpression Expression { get; } = Expression;
+
+        /// <summary>
+        /// BUG-104: memoized horizon for expressions that can never match.
+        /// Once <see cref="CronExpression.GetNext"/> exhausts its 4-year
+        /// search window, this is set to that horizon so subsequent ticks
+        /// skip the expensive scan until the horizon passes.
+        /// </summary>
+        public DateTimeOffset? ExhaustedUntil;
+    }
 
     private readonly Dictionary<string, JobEntry> _entries = [];
     private readonly ICronJobStore _store;
     private readonly ILogger<CronScheduler> _logger;
+    private readonly IHostApplicationLifetime? _lifetime;
 
     /// <summary>
     /// Distributed lock TTL applied when a cron job lock is acquired and on
@@ -34,10 +48,15 @@ public sealed class CronScheduler : ICronScheduler
     public TimeSpan CronLockTtl { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>Creates a scheduler with the given store and logger.</summary>
-    public CronScheduler(ICronJobStore store, ILogger<CronScheduler> logger)
+    /// <param name="store">The persistent job state store.</param>
+    /// <param name="logger">Logger.</param>
+    /// <param name="lifetime">Optional host lifetime used to cancel manually
+    /// triggered jobs during shutdown (BUG-128).</param>
+    public CronScheduler(ICronJobStore store, ILogger<CronScheduler> logger, IHostApplicationLifetime? lifetime = null)
     {
         _store = store;
         _logger = logger;
+        _lifetime = lifetime;
     }
 
     internal IReadOnlyCollection<CronJob> Jobs
@@ -95,8 +114,19 @@ public sealed class CronScheduler : ICronScheduler
             if (state.IsRunning && job.Options.Concurrency == CronJobConcurrency.SkipIfRunning)
                 continue;
 
+            // BUG-104: skip the 4-year scan for expressions already proven to
+            // never match within the memoized horizon.
+            if (entry.ExhaustedUntil is { } exhausted && now <= exhausted)
+                continue;
+
             var next = expr.GetNext(now - TimeSpan.FromSeconds(1));
-            if (next == null) continue;
+            if (next == null)
+            {
+                // No match within the next 4 years — memoize so this does not
+                // burn ~2.1M iterations on every 1-second tick.
+                entry.ExhaustedUntil = now.AddYears(4);
+                continue;
+            }
 
             lock (_entries) { if (_entries.TryGetValue(job.Name, out var e)) e.State.NextRun = next; }
             if (next > now) continue;
@@ -218,7 +248,32 @@ public sealed class CronScheduler : ICronScheduler
         var job = entry.Job;
         var state = entry.State;
 
-        _ = Task.Run(async () => await ExecuteJobAsync(job, state, lockHeld: false, CancellationToken.None));
+        // BUG-128: honor the concurrency policy — a manual trigger must not
+        // run concurrently with an in-flight scheduled execution.
+        if (state.IsRunning && job.Options.Concurrency == CronJobConcurrency.SkipIfRunning)
+        {
+            _logger.LogWarning("Cron job {Name} trigger skipped: already running", name);
+            return state;
+        }
+
+        // Link to the host shutdown token so a manually triggered job is
+        // cancelled when the application stops (previously CancellationToken.None).
+        var shutdownToken = _lifetime?.ApplicationStopping ?? CancellationToken.None;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ExecuteJobAsync(job, state, lockHeld: false, shutdownToken);
+            }
+            catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
+            {
+                // Expected during shutdown.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Cron job {Name} manual trigger failed", job.Name);
+            }
+        }, shutdownToken);
         return state;
     }
 

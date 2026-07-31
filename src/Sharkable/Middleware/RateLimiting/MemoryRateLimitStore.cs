@@ -8,7 +8,7 @@ namespace Sharkable;
 /// cap. Single-instance only; for distributed scenarios implement
 /// <see cref="IDistributedRateLimitStore"/> with Redis or similar.
 ///
-/// The cache's <c>SizeLimit</c> together with per-entry <c>Size = 256</c>
+/// The cache's <c>SizeLimit</c> together with per-entry <c>Size = 1</c>
 /// cost accounting caps the total number of distinct rate limit keys
 /// (default 100,000), so a slow-loris attacker cannot exhaust process
 /// memory by probing unique URLs in a tight loop. Entries expire
@@ -18,7 +18,6 @@ namespace Sharkable;
 /// </summary>
 public sealed class MemoryRateLimitStore : IDistributedRateLimitStore, IDisposable
 {
-    private const int EntrySize = 256;
     private readonly MemoryCache _cache;
     private bool _disposed;
 
@@ -59,7 +58,10 @@ public sealed class MemoryRateLimitStore : IDistributedRateLimitStore, IDisposab
         if (_disposed) return Task.FromResult(0L);
         var counter = _cache.GetOrCreate(key, entry =>
         {
-            entry.Size = EntrySize;
+            // BUG-109: one size unit per key — the previous 256-byte unit
+            // accounting meant MaxEntries=100,000 only held ~390 distinct
+            // keys, letting an attacker evict other clients' counters.
+            entry.Size = 1;
             entry.AbsoluteExpirationRelativeToNow = window;
             return new long[1];
         })!;

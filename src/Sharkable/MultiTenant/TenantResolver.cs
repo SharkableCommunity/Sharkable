@@ -11,7 +11,8 @@ public static class TenantResolver
     /// <summary>
     /// Resolves tenant from the first subdomain segment of the host.
     /// Example: <c>tenant1.myapp.com</c> → <c>"tenant1"</c>.
-    /// Returns <c>null</c> if the host has no subdomain.
+    /// Returns <c>null</c> if the host has no subdomain (apex domains such as
+    /// <c>myapp.com</c> are never treated as tenants — BUG-127).
     /// <para>
     /// SHARK-SEC-L007: when <see cref="TenantOptions.AllowedHosts"/> is set,
     /// the inbound <c>Host</c> header is validated against the allowlist.
@@ -40,8 +41,16 @@ public static class TenantResolver
             if (!matched) return null;
         }
 
+        // BUG-127: require a real subdomain — a bare apex host such as
+        // "myapp.com" must not be treated as the tenant "myapp" (which would
+        // route apex requests into tenant-scoped services with a fabricated
+        // tenant id). A host with at least two dots (e.g. "t1.myapp.com")
+        // yields the first label.
         var dotIndex = host.IndexOf('.');
-        return dotIndex > 0 ? host[..dotIndex] : null;
+        if (dotIndex <= 0)
+            return null;
+        var secondDot = host.IndexOf('.', dotIndex + 1);
+        return secondDot > 0 ? host[..dotIndex] : null;
     }
 
     /// <summary>

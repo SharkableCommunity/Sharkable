@@ -20,10 +20,11 @@ public static class SharkExtension
         //reset and invoke options
         Shark.SharkOption = new SharkOption();
         setupOptions?.Invoke(Shark.SharkOption);
-        services.Configure<SharkOption>((opt) => 
-        { 
-            setupOptions?.Invoke(opt);
-        });
+        // BUG-126: the previous services.Configure<SharkOption> re-invoked the
+        // user's setup callback on a second, divergent options instance. All
+        // framework reads now go through the single static Shark.SharkOption;
+        // the Configure registration is removed so side-effectful setup
+        // callbacks run exactly once and there is no second source of truth.
         //wire endpoints
         services.WireSharkEndpoint();
         //wire service lifetime
@@ -77,8 +78,11 @@ public static class SharkExtension
         if (Shark.SharkOption.RateLimitingOptions != null)
         {
             services.AddSingleton(Shark.SharkOption.RateLimitingOptions);
+            // BUG-136: register via factory so MS.DI owns the singleton and
+            // disposes it (Timer/Process handle) with the container — an
+            // instance registration is never disposed.
             if (Shark.SharkOption.RateLimitingOptions.EnableAdaptive)
-                services.AddSingleton(new AdaptiveLimitMonitor(Shark.SharkOption.RateLimitingOptions, autoStart: true));
+                services.AddSingleton(sp => new AdaptiveLimitMonitor(Shark.SharkOption.RateLimitingOptions, autoStart: true));
             if (Shark.SharkOption.RateLimitStoreFactory != null)
                 services.AddSingleton(Shark.SharkOption.RateLimitStoreFactory);
             else

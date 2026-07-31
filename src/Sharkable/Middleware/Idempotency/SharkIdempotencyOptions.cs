@@ -109,11 +109,12 @@ public sealed class SharkIdempotencyOptions
 
     /// <summary>
     /// Maximum number of distinct idempotency entries retained by the in-process
-    /// <see cref="MemoryIdempotencyStore"/>. Each completed entry accounts for
-    /// <c>Body.Length + 256</c> bytes of cache size; in-flight markers account
-    /// for 256 bytes. When the cap is reached the cache evicts the
-    /// least-recently-used entries. Default is 10,000. Prevents TB-DoS via
-    /// attackers generating random unique <c>Idempotency-Key</c> headers.
+    /// <see cref="MemoryIdempotencyStore"/> (in-flight markers and completed
+    /// records each count as one entry). When the cap is reached the cache
+    /// evicts the least-recently-used entries. Default is 10,000. Prevents
+    /// TB-DoS via attackers generating random unique <c>Idempotency-Key</c>
+    /// headers. Per-entry memory is bounded separately by
+    /// <see cref="MaxResponseSize"/>.
     /// </summary>
     public long MaxEntries { get; set; } = 10_000;
 }

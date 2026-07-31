@@ -129,11 +129,6 @@ public static class SharkableExtension
         if (Shark.SharkOption.TenantOptions?.ResolveTenant != null)
             app.UseMiddleware<TenantResolutionMiddleware>();
 
-        // rate limiter
-        if (Shark.SharkOption.RateLimiterConfigure != null)
-            app.UseRateLimiter();
-        if (Shark.SharkOption.RateLimitingOptions != null)
-            app.UseMiddleware<SharkRateLimiterMiddleware>();
         // output cache
         if (Shark.SharkOption.OutputCacheConfigure != null)
             app.UseOutputCache();
@@ -179,9 +174,17 @@ public static class SharkableExtension
                 action(app);
         }
 
-        // audit trail
+        // audit trail — registered BEFORE the rate limiter so rejected (429)
+        // requests are still audited (BUG-111).
         if (Shark.SharkOption.AuditTrailOptions != null)
             app.UseMiddleware<AuditTrailMiddleware>();
+
+        // rate limiter — registered AFTER authentication so the per-user key
+        // generator branch can see the authenticated identity (BUG-110).
+        if (Shark.SharkOption.RateLimiterConfigure != null)
+            app.UseRateLimiter();
+        if (Shark.SharkOption.RateLimitingOptions != null)
+            app.UseMiddleware<SharkRateLimiterMiddleware>();
 
         // idempotency — register when global enable is on OR per-endpoint opt-in
         // is configured (ConfigureIdempotency called). The middleware checks
@@ -252,12 +255,41 @@ public static class SharkableExtension
                     throw new TimeoutException(
                         $"Warmup did not complete within the configured timeout ({warmupTimeout}).");
             }
-            catch (AggregateException)
+            catch (AggregateException ex)
             {
-                throw;
+                // BUG-117: rethrow the root cause instead of the wrapper, and
+                // let the finally block cancel the sibling tasks.
+                throw ex.InnerException ?? ex;
             }
             finally
             {
+                // BUG-117: disposing a CTS does NOT signal cancellation — it
+                // only kills the auto-cancel timer. Cancel explicitly so
+                // sibling warmup tasks are actually stopped and cannot keep
+                // running unobserved (or throw ObjectDisposedException from
+                // later token.Register calls).
+                foreach (var cts in ctsList)
+                {
+                    try
+                    {
+                        cts.Cancel();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                }
+
+                // Give the cancelled tasks a bounded moment to unwind, then
+                // observe any faults so nothing is left unobserved.
+                try
+                {
+                    Task.WaitAll([.. tasks], TimeSpan.FromSeconds(5));
+                }
+                catch (AggregateException)
+                {
+                    // Expected for tasks cancelled by the timeout path.
+                }
+
                 foreach (var cts in ctsList)
                     cts.Dispose();
             }

@@ -43,35 +43,44 @@ public static class UnifiedResultExtension
     public static IResult AsBadRequest(this string? errors,
         HttpStatusCode statusCode = HttpStatusCode.BadRequest)
     {
-        return errors == null ? Results.BadRequest() : Results.BadRequest(errors.AsUnifiedError(statusCode));
+        return errors == null ? Results.StatusCode((int)statusCode) : Results.Json(errors.AsUnifiedError(statusCode), statusCode: (int)statusCode);
     }
 
-    /// <summary>Returns a 401 <see cref="IResult"/>.</summary>
+    /// <summary>
+    /// Returns a 401 <see cref="IResult"/> with the given error message.
+    /// BUG-135: the previous implementation dropped the message and ignored
+    /// <paramref name="statusCode"/> — every member of this family now emits
+    /// the unified error envelope.
+    /// </summary>
     public static IResult AsUnauthorized(this string? errors,
         HttpStatusCode statusCode = HttpStatusCode.Unauthorized)
     {
-        return Results.Unauthorized();
+        return errors == null ? Results.StatusCode((int)statusCode) : Results.Json(errors.AsUnifiedError(statusCode), statusCode: (int)statusCode);
     }
 
     /// <summary>Returns a 404 <see cref="IResult"/> with the given error message.</summary>
     public static IResult AsNotFound(this string? errors,
         HttpStatusCode statusCode = HttpStatusCode.NotFound)
     {
-        return errors == null ? Results.NotFound() : Results.NotFound(errors.AsUnifiedError(statusCode));
+        return errors == null ? Results.StatusCode((int)statusCode) : Results.Json(errors.AsUnifiedError(statusCode), statusCode: (int)statusCode);
     }
 
-    /// <summary>Returns a 403 <see cref="IResult"/>.</summary>
+    /// <summary>
+    /// Returns a 403 <see cref="IResult"/> with the given error message.
+    /// BUG-135: the previous implementation dropped the message and ignored
+    /// <paramref name="statusCode"/>.
+    /// </summary>
     public static IResult AsForbidden(this string? errors,
         HttpStatusCode statusCode = HttpStatusCode.Forbidden)
     {
-        return Results.Forbid();
+        return errors == null ? Results.StatusCode((int)statusCode) : Results.Json(errors.AsUnifiedError(statusCode), statusCode: (int)statusCode);
     }
 
     /// <summary>Returns a 409 <see cref="IResult"/> with the given error message.</summary>
     public static IResult AsConflict(this string? errors,
         HttpStatusCode statusCode = HttpStatusCode.Conflict)
     {
-        return errors == null ? Results.Conflict() : Results.Conflict(errors.AsUnifiedError(statusCode));
+        return errors == null ? Results.StatusCode((int)statusCode) : Results.Json(errors.AsUnifiedError(statusCode), statusCode: (int)statusCode);
     }
 
     /// <summary>Returns a 204 <see cref="IResult"/>.</summary>
@@ -85,9 +94,11 @@ public static class UnifiedResultExtension
         string? uri = null,
         string? errors = null)
     {
+        // BUG-134: always honor the 201 status — the previous null-uri path
+        // downgraded to 200 OK.
         var result = data.AsUnifiedResult(errors, HttpStatusCode.Created);
         if (result == null) return Results.StatusCode(201);
-        return uri != null ? Results.Created(uri, result) : Results.Ok(result);
+        return uri != null ? Results.Created(uri, result) : Results.Json(result, statusCode: 201);
     }
 
     /// <summary>Returns a 202 <see cref="IResult"/> with the given data and optional location URI.</summary>

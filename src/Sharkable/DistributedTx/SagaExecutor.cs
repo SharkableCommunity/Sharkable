@@ -222,25 +222,45 @@ public sealed class SagaExecutor : ISagaExecutor
     private async Task<SagaResult> CompensateAsync(
         string sagaId, Saga saga, int completedCount, CancellationToken ct, string error)
     {
-        // Use a dedicated CTS for compensation so it is NOT cancelled when the
-        // execution token fires — the saga must always be able to roll back.
-        using var compensationCts = new CancellationTokenSource(CompensationTimeout);
-        var compensationCt = compensationCts.Token;
+        var compensationFailed = false;
 
         for (var i = completedCount - 1; i >= 0; i--)
         {
             _logger.LogWarning("Saga {SagaId} compensating step {Index}", sagaId, i + 1);
             try
             {
-                await saga.Steps[i].CompensateAsync(compensationCt);
+                // BUG-115: fresh per-step timeout so one slow step cannot
+                // consume the whole compensation budget and silently starve
+                // the remaining rollback steps.
+                using var stepCts = new CancellationTokenSource(CompensationTimeout);
+                await saga.Steps[i].CompensateAsync(stepCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogError(
+                    "Saga {SagaId} compensation for step {Index} timed out after {Timeout}",
+                    sagaId, i, CompensationTimeout);
+                compensationFailed = true;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Saga {SagaId} compensation for step {Index} failed", sagaId, i);
+                compensationFailed = true;
             }
         }
 
-        await _store.DeleteAsync(sagaId, compensationCt);
+        if (compensationFailed)
+        {
+            // BUG-116: keep the persisted progress so a later retry resumes
+            // from the correct step instead of re-running forward steps of a
+            // saga whose rollback never completed.
+            _logger.LogError(
+                "Saga {SagaId} compensation incomplete; progress retained for manual/out-of-band recovery",
+                sagaId);
+            return new SagaResult(false, $"{error} (compensation incomplete — saga progress retained)", completedCount);
+        }
+
+        await _store.DeleteAsync(sagaId, CancellationToken.None);
         return new SagaResult(false, error, completedCount);
     }
 }

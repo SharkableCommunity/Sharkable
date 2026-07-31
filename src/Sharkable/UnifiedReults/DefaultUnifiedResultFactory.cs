@@ -19,8 +19,19 @@ internal sealed class DefaultUnifiedResultFactory : IUnifiedResultFactory
 
 internal static class UnifiedResultFactoryHelper
 {
+    /// <summary>
+    /// Resolves the unified result factory with the documented precedence:
+    /// 1) <see cref="SharkOption.UnifiedResultFactory"/> (the AGENTS.md
+    /// factory-pattern extension point),
+    /// 2) a DI-registered <see cref="IUnifiedResultFactory"/>,
+    /// 3) the built-in default.
+    /// </summary>
     internal static IUnifiedResultFactory ResolveFactory()
     {
-        return Shark.SharkOption.UnifiedResultFactory ?? DefaultUnifiedResultFactory.Instance;
+        if (Shark.SharkOption.UnifiedResultFactory != null)
+            return Shark.SharkOption.UnifiedResultFactory;
+
+        var di = InternalShark.ServiceProvider?.GetService<IUnifiedResultFactory>();
+        return di ?? DefaultUnifiedResultFactory.Instance;
     }
 }

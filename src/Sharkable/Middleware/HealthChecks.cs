@@ -59,6 +59,16 @@ internal sealed class JwtHealthCheck : IHealthCheck
         if (string.IsNullOrEmpty(authority))
             return HealthCheckResult.Unhealthy("JWT authority is not configured");
 
+        // BUG-122: a non-URL authority (e.g. a plain issuer name for
+        // self-issued JWTs — the documented ConfigureJwt pattern) cannot be
+        // probed. Treat it as healthy instead of permanently unhealthy, which
+        // would make /healthz fail readiness checks forever.
+        if (!Uri.TryCreate(authority, UriKind.Absolute, out var authorityUri)
+            || (authorityUri.Scheme != Uri.UriSchemeHttp && authorityUri.Scheme != Uri.UriSchemeHttps))
+        {
+            return HealthCheckResult.Healthy("JWT authority is not an HTTP(S) endpoint; skipping probe");
+        }
+
         // SHARK-SEC-M004: /healthz is publicly readable and the previous
         // implementation echoed the authority URL (and ex.Message on
         // failure) into the JSON description, leaking the OIDC issuer
@@ -79,21 +89,32 @@ internal sealed class JwtHealthCheck : IHealthCheck
             // DI (some test hosts do not register the factory).
             var http = _httpClientFactory?.CreateClient("sharkable.jwt-authority")
                        ?? new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var ownsHttp = _httpClientFactory == null;
 
-            var response = await http.GetAsync(
-                $"{authority.TrimEnd('/')}/.well-known/openid-configuration",
-                probeCts.Token);
-
-            if (response.IsSuccessStatusCode)
+            try
             {
-                logger?.LogDebug("JWT authority reachable: {Authority}", authority);
-                return HealthCheckResult.Healthy("JWT authority reachable");
-            }
+                // BUG-123: dispose the response (and its content stream) so
+                // the pooled connection is returned promptly.
+                using var response = await http.GetAsync(
+                    $"{authority.TrimEnd('/')}/.well-known/openid-configuration",
+                    probeCts.Token);
 
-            logger?.LogWarning(
-                "JWT authority returned {StatusCode}: {Authority}",
-                response.StatusCode, authority);
-            return HealthCheckResult.Degraded("JWT authority probe failed");
+                if (response.IsSuccessStatusCode)
+                {
+                    logger?.LogDebug("JWT authority reachable: {Authority}", authority);
+                    return HealthCheckResult.Healthy("JWT authority reachable");
+                }
+
+                logger?.LogWarning(
+                    "JWT authority returned {StatusCode}: {Authority}",
+                    response.StatusCode, authority);
+                return HealthCheckResult.Degraded("JWT authority probe failed");
+            }
+            finally
+            {
+                if (ownsHttp)
+                    http.Dispose();
+            }
         }
         catch (Exception ex)
         {

@@ -124,7 +124,11 @@ internal static class AttributeBasedServiceCollectionExtensions
                     Type[] ts = implementation.GetInterfaces();
                     if (ts?.Length > 0)
                     {
-                        foreach (Type type in implementation.GetInterfaces())
+                        // BUG-125: only register business interfaces — never
+                        // framework interfaces (System.*, Microsoft.*) such as
+                        // IDisposable/IAsyncDisposable, which would make
+                        // sp.GetService<IDisposable>() return business classes.
+                        foreach (Type type in implementation.GetInterfaces().Where(IsBusinessInterface))
                         {
                             Utils.WriteDebug("injecting service:" + type.Name + "," + implementation.Name);
                             serviceCollection.TryAdd(type, implementation, lifetime);
@@ -190,12 +194,14 @@ internal static class AttributeBasedServiceCollectionExtensions
 
     /// <summary>
     /// Register a type for its business interfaces, base class, or itself,
-    /// excluding the marker interfaces (<see cref="ISingleton"/> etc.).
+    /// excluding the marker interfaces (<see cref="ISingleton"/> etc.) and
+    /// framework interfaces (BUG-125).
     /// </summary>
     private static void RegisterImplementation(this IServiceCollection services, Type implementation, ServiceLifetime lifetime)
     {
         var businessInterfaces = implementation.GetInterfaces()
             .Where(i => i != typeof(ISingleton) && i != typeof(IScoped) && i != typeof(ITransient))
+            .Where(IsBusinessInterface)
             .ToArray();
 
         if (businessInterfaces.Length > 0)
@@ -218,6 +224,22 @@ internal static class AttributeBasedServiceCollectionExtensions
             Utils.WriteDebug("injecting service (marker):" + implementation.Name + "," + implementation.Name);
             services.TryAdd(implementation, implementation, lifetime);
         }
+    }
+
+    /// <summary>
+    /// BUG-125: an interface is a business interface only when it is not a
+    /// framework type. Registering <c>IDisposable</c>/<c>IAsyncDisposable</c>
+    /// or any System/Microsoft interface as the DI service for a business
+    /// class hijacks framework resolution (e.g. disposal probing).
+    /// </summary>
+    private static bool IsBusinessInterface(Type iface)
+    {
+        var ns = iface.Namespace;
+        if (string.IsNullOrEmpty(ns))
+            return true;
+        return ns != "System"
+            && !ns.StartsWith("System.", StringComparison.Ordinal)
+            && !ns.StartsWith("Microsoft.", StringComparison.Ordinal);
     }
 }
 

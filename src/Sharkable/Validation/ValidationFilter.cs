@@ -25,8 +25,16 @@ internal sealed class ValidationFilter : IEndpointFilter
             var argType = arg.GetType();
             var validatorFactory = _validatorCache.GetOrAdd(argType, static t =>
             {
-                var validatorType = typeof(IValidator<>).MakeGenericType(t);
-                return sp => sp.GetService(validatorType) as IValidator;
+                // BUG-118: prefer the registration-time index built by
+                // AddValidators — no MakeGenericType on the request path.
+                if (ValidatorRegistry.TryGet(t, out var validatorType))
+                    return sp => sp.GetService(validatorType) as IValidator;
+
+                // Fallback for validators registered manually (e.g. in AOT
+                // mode where assembly scanning is skipped): resolved once per
+                // type and cached, never per request.
+                var runtimeType = typeof(IValidator<>).MakeGenericType(t);
+                return sp => sp.GetService(runtimeType) as IValidator;
             });
             var validator = validatorFactory(context.HttpContext.RequestServices);
 
@@ -68,7 +76,12 @@ internal sealed class ValidationFilter : IEndpointFilter
 
             context.HttpContext.Response.StatusCode = 400;
             context.HttpContext.Response.ContentType = "application/problem+json";
-            await context.HttpContext.Response.WriteAsJsonAsync(problemDetails, problemDetails.GetType());
+            // BUG-119: serialize through the source-generated context so this
+            // path works under NativeAOT (runtime-Type serialization throws
+            // for types absent from the resolver chain).
+            await context.HttpContext.Response.WriteAsJsonAsync(
+                problemDetails,
+                UnifiedResultSourceContext.Default.ValidationProblemDetails);
             return new ValidationShortCircuit();
         }
 
@@ -78,7 +91,19 @@ internal sealed class ValidationFilter : IEndpointFilter
 
         context.HttpContext.Response.StatusCode = 400;
         context.HttpContext.Response.ContentType = "application/json";
-        await context.HttpContext.Response.WriteAsJsonAsync(body, body.GetType());
+        // BUG-119: serialize through the source-generated context so this path
+        // works under NativeAOT. When a custom IUnifiedResultFactory produces a
+        // different runtime type, fall back to the (JIT-only) runtime-Type path.
+        if (body.GetType() == typeof(UnifiedResult<object?>))
+        {
+            await context.HttpContext.Response.WriteAsJsonAsync(
+                (UnifiedResult<object?>)body,
+                UnifiedResultSourceContext.Default.UnifiedResultObject);
+        }
+        else
+        {
+            await context.HttpContext.Response.WriteAsJsonAsync(body, body.GetType());
+        }
         return new ValidationShortCircuit();
     }
 

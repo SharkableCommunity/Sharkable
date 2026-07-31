@@ -55,6 +55,24 @@ internal sealed class ETagMiddleware
             return;
         }
 
+        // BUG-113: never buffer or ETag streaming responses — the spool would
+        // grow without bound and the ETag would be meaningless.
+        if (context.Response.ContentType?.StartsWith("text/event-stream", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            await counting.FlushAsync(context.RequestAborted);
+            return;
+        }
+
+        // BUG-113: if the endpoint flushed mid-response (SSE, chunked
+        // streaming), the response has already started — mutating headers or
+        // the status code would throw InvalidOperationException and turn a
+        // successful stream into a 500.
+        if (context.Response.HasStarted)
+        {
+            await counting.FlushAsync(context.RequestAborted);
+            return;
+        }
+
         if (limitExceeded || counting.BytesWritten > _options.MaxResponseSize)
         {
             _logger.LogWarning(
@@ -69,7 +87,10 @@ internal sealed class ETagMiddleware
         var etag = $"\"{hashHex}\"";
 
         context.Response.Headers["ETag"] = etag;
-        context.Response.Headers["Cache-Control"] = _options.CacheControlHeader;
+        // BUG-113: do not overwrite a Cache-Control the endpoint already set
+        // (e.g. no-store on sensitive GETs) — only add the default when absent.
+        if (!context.Response.Headers.ContainsKey("Cache-Control"))
+            context.Response.Headers["Cache-Control"] = _options.CacheControlHeader;
 
         if (context.Request.Headers.TryGetValue("If-None-Match", out var ifNoneMatch)
             && MatchesIfNoneMatch(ifNoneMatch, hashHex))

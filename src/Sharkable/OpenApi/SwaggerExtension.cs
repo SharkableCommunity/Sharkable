@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -58,7 +59,25 @@ internal static class OpenApiExtension
                     return Task.CompletedTask;
                 });
 
-                if (Shark.SharkOption.EnableAutoWrap)
+                // BUG-130: mark operations whose endpoint opted out of auto-wrap
+                // ([SharkDontWrap] / .DisableAutoWrap()) so the document
+                // transformer below skips wrapping their response schemas.
+                options.AddOperationTransformer((operation, context, cancellationToken) =>
+                {
+                    var metadata = context.Description?.ActionDescriptor?.EndpointMetadata;
+                    if (metadata != null && metadata.Any(m => m is DisableAutoWrapMetadata))
+                    {
+                        operation.Extensions ??= new Dictionary<string, IOpenApiExtension>();
+                        operation.Extensions["x-shark-disable-auto-wrap"] = new JsonNodeExtension(JsonValue.Create(true));
+                    }
+                    return Task.CompletedTask;
+                });
+
+                // BUG-130: evaluate the effective auto-wrap flag — the runtime
+                // behavior is `UseSharkOptions.EnableAutoWrap ?? SharkOption.EnableAutoWrap`
+                // (EndPointExtension), so the document must follow the same rule.
+                var effectiveAutoWrap = Shark.UseSharkOptions?.EnableAutoWrap ?? Shark.SharkOption.EnableAutoWrap;
+                if (effectiveAutoWrap == true)
                 {
                     options.AddDocumentTransformer((document, context, cancellationToken) =>
                     {
@@ -70,18 +89,39 @@ internal static class OpenApiExtension
                             {
                                 if (operation?.Responses == null)
                                     continue;
+                                if (operation.Extensions?.ContainsKey("x-shark-disable-auto-wrap") == true)
+                                    continue;
                                 foreach (var response in operation.Responses.Values)
                                 {
                                     if (response?.Content == null)
                                         continue;
-                                    if (response.Content.TryGetValue("application/json", out var mediaType)
-                                        && mediaType.Schema is OpenApiSchema original
-                                        && original.Properties?.ContainsKey("data") != true)
+                                    if (!response.Content.TryGetValue("application/json", out var mediaType)
+                                        || mediaType.Schema is not IOpenApiSchema originalSchema)
+                                        continue;
+
+                                    // Skip already-wrapped schemas (inline "data"
+                                    // property, or a $ref to a component schema
+                                    // that already has one).
+                                    if (IsAlreadyWrapped(originalSchema, document))
+                                        continue;
+
+                                    var wrapSchema = Shark.SharkOption.WrapSchemaFactory;
+                                    if (originalSchema is OpenApiSchema inlineSchema)
                                     {
-                                        var wrapSchema = Shark.SharkOption.WrapSchemaFactory;
                                         mediaType.Schema = wrapSchema != null
-                                            ? wrapSchema(original)
-                                            : DefaultUnifiedResultSchema(original);
+                                            ? wrapSchema(inlineSchema)
+                                            : DefaultUnifiedResultSchema(inlineSchema);
+                                    }
+                                    else
+                                    {
+                                        // BUG-130: $ref schemas surface as
+                                        // OpenApiSchemaReference (not an
+                                        // OpenApiSchema subclass) in
+                                        // Microsoft.OpenApi 2.x — wrap them by
+                                        // keeping the reference as the "data"
+                                        // value so the document matches the
+                                        // runtime envelope.
+                                        mediaType.Schema = DefaultUnifiedResultSchema(originalSchema);
                                     }
                                 }
                             }
@@ -102,6 +142,11 @@ internal static class OpenApiExtension
     /// Microsoft.OpenApi's built-in pipeline) plus the framework-specific
     /// <see cref="SharkOpenApiIgnoreAttribute"/> for callers who do not
     /// want a System.Text.Json dependency (SHARK-SEC-L009).
+    /// Traverses <see cref="OpenApiSchemaTransformerContext.JsonTypeInfo"/>
+    /// (AOT-safe) instead of raw <c>Type.GetMembers</c> reflection; the
+    /// framework attribute is read via the property's
+    /// <see cref="System.Reflection.ICustomAttributeProvider"/>, which is
+    /// unavailable in trimmed builds — AOT callers must use <c>[JsonIgnore]</c>.
     /// </summary>
     private static Task<OpenApiSchema> RemoveSensitiveProperties(
         OpenApiSchema schema, OpenApiSchemaTransformerContext context, CancellationToken cancellationToken)
@@ -109,32 +154,56 @@ internal static class OpenApiExtension
         if (schema.Properties == null || schema.Properties.Count == 0)
             return Task.FromResult(schema);
 
-        var type = context.JsonTypeInfo.Type;
-        if (type == null) return Task.FromResult(schema);
+        var jsonTypeInfo = context.JsonTypeInfo;
+        if (jsonTypeInfo?.Properties == null)
+            return Task.FromResult(schema);
 
-        foreach (var member in type.GetMembers(BindingFlags.Public | BindingFlags.Instance))
+        foreach (var property in jsonTypeInfo.Properties)
         {
-            var ignoreAttr = member.GetCustomAttribute<SharkOpenApiIgnoreAttribute>();
-            if (ignoreAttr == null) continue;
+            // BUG-121: read the attribute from the CLR property metadata via
+            // AttributeProvider (null in trimmed builds — use [JsonIgnore] there).
+            var ignoreAttr = property.AttributeProvider
+                ?.GetCustomAttributes(typeof(SharkOpenApiIgnoreAttribute), false)
+                .OfType<SharkOpenApiIgnoreAttribute>()
+                .FirstOrDefault();
+            if (ignoreAttr == null)
+                continue;
 
-            var jsonName = member.Name;
-            if (member.GetCustomAttribute<System.Text.Json.Serialization.JsonPropertyNameAttribute>() is { } jpna)
-                jsonName = jpna.Name;
+            // property.Name is the JSON name (JsonPropertyNameAttribute applied).
+            if (schema.Properties.ContainsKey(property.Name))
+                schema.Properties.Remove(property.Name);
 
-            if (schema.Properties.ContainsKey(jsonName))
-                schema.Properties.Remove(jsonName);
-
-            if (!string.IsNullOrEmpty(schema.Required?.Count > 0 ? null : null)
-                && schema.Required?.Remove(jsonName) == true)
-            {
-                // best-effort: schema may or may not track Required separately.
-            }
+            // BUG-121: the previous code had a dead ternary that always
+            // evaluated to null, so required entries were never cleaned up.
+            schema.Required?.Remove(property.Name);
         }
 
         return Task.FromResult(schema);
     }
 
-    private static OpenApiSchema DefaultUnifiedResultSchema(OpenApiSchema original)
+    /// <summary>
+    /// True when a response schema already represents the unified envelope
+    /// (has a <c>data</c> property), either inline or via a <c>$ref</c> to a
+    /// component schema that does. Prevents double wrapping (BUG-130).
+    /// </summary>
+    private static bool IsAlreadyWrapped(IOpenApiSchema schema, OpenApiDocument document)
+    {
+        if (schema is OpenApiSchema inline && inline.Properties?.ContainsKey("data") == true)
+            return true;
+
+        if (schema is OpenApiSchemaReference reference
+            && reference.Reference?.Id is { } refId
+            && document.Components?.Schemas?.TryGetValue(refId, out var target) == true
+            && target is OpenApiSchema targetSchema
+            && targetSchema.Properties?.ContainsKey("data") == true)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static OpenApiSchema DefaultUnifiedResultSchema(IOpenApiSchema original)
     {
         return new OpenApiSchema
         {
