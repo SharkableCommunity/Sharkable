@@ -1,21 +1,62 @@
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.Extensions.Options;
 
 namespace Sharkable;
 
-internal sealed class ApiKeyValidator : IDisposable
+/// <summary>
+/// Shared API-key validator with cached constant-time SHA-256 comparisons
+/// (SHARK-SEC-008). Reads keys from the single static
+/// <see cref="Shark.SharkOption"/> instance and rebuilds its hash cache
+/// whenever the <c>ApiKeys</c> array reference changes — keeping hot-reload
+/// semantics without depending on the DI options machinery (BUG-126: all
+/// framework state lives on the static options instance).
+/// </summary>
+internal sealed class ApiKeyValidator
 {
-    private readonly IOptionsMonitor<SharkOption> _options;
-    private readonly IDisposable? _changeListener;
+    private readonly object _sync = new();
     private byte[][] _cachedHashes = [];
-    private bool _disposed;
+    private string[]? _cachedKeys;
 
-    public ApiKeyValidator(IOptionsMonitor<SharkOption> options)
+    /// <summary>
+    /// Validates a candidate API key against the configured keys using
+    /// constant-time comparison. Returns <c>false</c> when no keys are
+    /// configured or the key does not match.
+    /// </summary>
+    public bool Validate(string providedApiKey)
     {
-        _options = options;
-        RebuildCache(options.CurrentValue.ApiKeys);
-        _changeListener = options.OnChange((opt, _) => RebuildCache(opt.ApiKeys));
+        var keys = Shark.SharkOption.ApiKeys;
+        if (!ReferenceEquals(keys, _cachedKeys))
+        {
+            lock (_sync)
+            {
+                if (!ReferenceEquals(keys, _cachedKeys))
+                {
+                    _cachedKeys = keys;
+                    RebuildCache(keys);
+                }
+            }
+        }
+
+        var cached = _cachedHashes;
+        if (cached.Length == 0) return false;
+        var candidateHash = SHA256.HashData(Encoding.UTF8.GetBytes(providedApiKey));
+        var matched = false;
+        for (var i = 0; i < cached.Length; i++)
+        {
+            if (CryptographicOperations.FixedTimeEquals(candidateHash, cached[i]))
+                matched = true;
+        }
+        return matched;
+    }
+
+    /// <summary>True when at least one API key is configured.</summary>
+    public bool HasConfiguredKeys
+    {
+        get
+        {
+            var keys = Shark.SharkOption.ApiKeys;
+            return keys is { Length: > 0 };
+        }
     }
 
     private void RebuildCache(string[]? keys)
@@ -29,28 +70,5 @@ internal sealed class ApiKeyValidator : IDisposable
         for (var i = 0; i < keys.Length; i++)
             hashes[i] = SHA256.HashData(Encoding.UTF8.GetBytes(keys[i]));
         _cachedHashes = hashes;
-    }
-
-    public bool Validate(string providedApiKey)
-    {
-        var cached = _cachedHashes;
-        if (cached.Length == 0) return false;
-        var candidateHash = SHA256.HashData(Encoding.UTF8.GetBytes(providedApiKey));
-        var matched = false;
-        for (var i = 0; i < cached.Length; i++)
-        {
-            if (CryptographicOperations.FixedTimeEquals(candidateHash, cached[i]))
-                matched = true;
-        }
-        return matched;
-    }
-
-    public bool HasConfiguredKeys => _cachedHashes.Length > 0;
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-        _changeListener?.Dispose();
     }
 }

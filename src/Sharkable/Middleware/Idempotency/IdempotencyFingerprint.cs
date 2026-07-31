@@ -33,7 +33,7 @@ internal static class IdempotencyFingerprint
         sha.AppendData(methodBytes);
         sha.AppendData(new byte[] { (byte)'\n' });
         var pathValue = path.Value ?? "/";
-        sha.AppendData(Encoding.ASCII.GetBytes(pathValue));
+        sha.AppendData(Encoding.UTF8.GetBytes(pathValue));
         sha.AppendData(new byte[] { (byte)'\n' });
         sha.AppendData(body);
         return Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant();
@@ -74,7 +74,7 @@ internal static class IdempotencyFingerprint
         sha.AppendData(methodBytes);
         sha.AppendData(new byte[] { (byte)'\n' });
         var pathValue = path.Value ?? "/";
-        sha.AppendData(Encoding.ASCII.GetBytes(pathValue));
+        sha.AppendData(Encoding.UTF8.GetBytes(pathValue));
         sha.AppendData(new byte[] { (byte)'\n' });
         sha.AppendData(Encoding.ASCII.GetBytes(contentLength.ToString()));
         sha.AppendData(new byte[] { (byte)'\n' });

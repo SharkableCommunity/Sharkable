@@ -1,3 +1,5 @@
+using System.Numerics;
+
 namespace Sharkable;
 
 /// <summary>
@@ -51,7 +53,9 @@ public sealed class CronExpression
     /// or <c>null</c> if no future match exists within a reasonable search
     /// window (~4 years). Iteration is capped at <see cref="MaxIterations"/>
     /// minute-steps so a non-matching pattern cannot burn CPU on every tick
-    /// (SHARK-SEC-M011).
+    /// (SHARK-SEC-M011). The search aligns to the seconds field on every
+    /// minute boundary, so fixed-second patterns (e.g. <c>30 * * * * *</c>)
+    /// match correctly instead of degenerating to second 0.
     /// </summary>
     public DateTimeOffset? GetNext(DateTimeOffset after)
     {
@@ -62,23 +66,53 @@ public sealed class CronExpression
         var limit = dt.AddYears(4);
         for (var i = 0; i < MaxIterations && dt <= limit; i++)
         {
+            // Align to the first second value of the seconds field that is
+            // >= the current second. If none remains in this minute, advance
+            // to the next minute (its first matching second is picked on the
+            // next loop iteration).
+            var nextSecond = FindNextBit(_fields[0], dt.Second);
+            if (nextSecond < 0)
+            {
+                dt = MinuteStart(dt).AddMinutes(1);
+                continue;
+            }
+
+            dt = new DateTimeOffset(dt.Year, dt.Month, dt.Day,
+                dt.Hour, dt.Minute, nextSecond, dt.Offset);
+
             if (Matches(dt))
                 return dt;
-            dt = dt.AddMinutes(1);
-            dt = new DateTimeOffset(dt.Year, dt.Month, dt.Day,
-                dt.Hour, dt.Minute, 0, dt.Offset);
+
+            // Advance to the next minute; the seconds field is re-aligned there.
+            dt = MinuteStart(dt).AddMinutes(1);
         }
         return null;
     }
 
+    private static DateTimeOffset MinuteStart(DateTimeOffset dt)
+        => new(dt.Year, dt.Month, dt.Day, dt.Hour, dt.Minute, 0, dt.Offset);
+
     private bool Matches(DateTimeOffset dt)
     {
-        return HasBit(_fields[5], (int)dt.DayOfWeek)
+        return HasBit(_fields[5], WeekdayIndex(dt.DayOfWeek))
             && HasBit(_fields[4], dt.Month)
             && HasBit(_fields[3], dt.Day)
             && HasBit(_fields[2], dt.Hour)
             && HasBit(_fields[1], dt.Minute)
             && HasBit(_fields[0], dt.Second);
+    }
+
+    /// <summary>Maps <see cref="DayOfWeek"/> (0=Sunday..6=Saturday) to the
+    /// 0..6 bit index used by the week field; values of 7 (also Sunday in
+    /// many cron dialects) are folded to 0 at parse time.</summary>
+    private static int WeekdayIndex(DayOfWeek dayOfWeek) => (int)dayOfWeek;
+
+    /// <summary>Returns the smallest bit index &gt;= <paramref name="from"/> set in
+    /// <paramref name="bits"/>, or -1 when no such bit exists.</summary>
+    private static int FindNextBit(ulong bits, int from)
+    {
+        var mask = bits & ~((1UL << from) - 1);
+        return mask == 0 ? -1 : BitOperations.TrailingZeroCount(mask);
     }
 
     private static ulong ParseField(string field, int min, int max, string original)
@@ -94,7 +128,9 @@ public sealed class CronExpression
             }
             else if (trimmed.StartsWith("*/"))
             {
-                var step = int.Parse(trimmed[2..]);
+                // BUG-103: step 0 would loop forever (v += 0 never advances).
+                var step = ParseStep(trimmed[2..], original);
+                ValidateStepAgainstMax(step, max, original);
                 for (var v = min; v <= max; v += step)
                     bits |= 1UL << v;
             }
@@ -102,31 +138,62 @@ public sealed class CronExpression
             {
                 var slash = trimmed.IndexOf('/');
                 var range = trimmed[..slash];
-                var step = int.Parse(trimmed[(slash + 1)..]);
-                var (rMin, rMax) = ParseRange(range, min, max);
+                // BUG-103: a range-less step ("N/step", valid cron) means
+                // "from N to the field max, stepping by step".
+                var (rMin, rMax) = ParseRange(range, min, max, original);
+                var step = ParseStep(trimmed[(slash + 1)..], original);
+                ValidateStepAgainstMax(step, max, original);
                 for (var v = rMin; v <= rMax; v += step)
                     bits |= 1UL << v;
             }
             else if (trimmed.Contains('-'))
             {
-                var (rMin, rMax) = ParseRange(trimmed, min, max);
+                var (rMin, rMax) = ParseRange(trimmed, min, max, original);
+                if (rMin > rMax)
+                    throw new FormatException($"Invalid range '{trimmed}' in '{original}': lower bound exceeds upper bound");
                 for (var v = rMin; v <= rMax; v++)
                     bits |= 1UL << v;
             }
             else
             {
                 var v = int.Parse(trimmed);
-                if (v < min || v > max)
+                // BUG-144: week field accepts 7 as Sunday (standard cron dialect).
+                var isSundaySeven = max == 6 && v == 7;
+                if (v < min || (v > max && !isSundaySeven))
                     throw new FormatException($"Value {v} out of range [{min},{max}] in '{original}'");
-                bits |= 1UL << v;
+                bits |= 1UL << (isSundaySeven ? 0 : v);
             }
         }
         return bits;
     }
 
-    private static (int min, int max) ParseRange(string range, int fieldMin, int fieldMax)
+    private static int ParseStep(string stepText, string original)
+    {
+        if (!int.TryParse(stepText, out var step) || step < 1)
+            throw new FormatException($"Invalid step '{stepText}' in '{original}': must be a positive integer");
+        return step;
+    }
+
+    /// <summary>Validates a parsed step against the field's max value —
+    /// a step larger than the field range would silently yield only the first
+    /// value, which is almost certainly a configuration mistake.</summary>
+    private static void ValidateStepAgainstMax(int step, int max, string original)
+    {
+        if (step > max)
+            throw new FormatException($"Step {step} exceeds the field maximum {max} in '{original}'");
+    }
+
+    private static (int min, int max) ParseRange(string range, int fieldMin, int fieldMax, string original)
     {
         var dash = range.IndexOf('-');
+        if (dash < 0)
+        {
+            // Range-less base ("N/step") — treat as N..fieldMax.
+            var single = int.Parse(range);
+            if (single < fieldMin || single > fieldMax)
+                throw new FormatException($"Value {single} out of range [{fieldMin},{fieldMax}] in '{original}'");
+            return (single, fieldMax);
+        }
         var rMin = int.Parse(range[..dash]);
         var rMax = int.Parse(range[(dash + 1)..]);
         return (Math.Max(rMin, fieldMin), Math.Min(rMax, fieldMax));

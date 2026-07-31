@@ -64,52 +64,67 @@ internal sealed class AuditLogBuffer : IDisposable
         var buffer = new List<AuditLogEntry>(_batchSize);
         var reader = _channel.Reader;
 
-        while (!ct.IsCancellationRequested)
+        try
         {
-            try
+            while (!ct.IsCancellationRequested)
             {
-                if (!await reader.WaitToReadAsync(ct).ConfigureAwait(false))
-                    break;
-
-                buffer.Clear();
-                var timer = _batchSize > 1 ? Task.Delay(_flushInterval, ct) : Task.CompletedTask;
-
-                while (buffer.Count < _batchSize && reader.TryRead(out var entry))
+                try
                 {
-                    buffer.Add(entry);
+                    if (!await reader.WaitToReadAsync(ct).ConfigureAwait(false))
+                        break;
+
+                    buffer.Clear();
+                    var timer = _batchSize > 1 ? Task.Delay(_flushInterval, ct) : Task.CompletedTask;
+
+                    while (buffer.Count < _batchSize && reader.TryRead(out var entry))
+                    {
+                        buffer.Add(entry);
+                    }
+
+                    await FlushBatchAsync(buffer);
+
+                    if (_batchSize > 1)
+                    {
+                        try { await timer; } catch (OperationCanceledException) { }
+                    }
                 }
-
-                FlushBatch(buffer);
-
-                if (_batchSize > 1)
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    try { await timer; } catch (OperationCanceledException) { }
+                    if (Interlocked.CompareExchange(ref _errorLogged, 1, 0) == 0)
+                        _logger.LogError(ex, "AuditLogBuffer consumer loop faulted; resuming");
                 }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                if (Interlocked.CompareExchange(ref _errorLogged, 1, 0) == 0)
-                    _logger.LogError(ex, "AuditLogBuffer consumer loop faulted; resuming");
             }
         }
+        catch (OperationCanceledException)
+        {
+            // Expected on shutdown — fall through to the drain below.
+        }
+        finally
+        {
+            // BUG-112: drain whatever is left so EnsureFlushOnShutdown is
+            // honored. Previously a cancellation landing inside
+            // WaitToReadAsync(ct) escaped the loop and skipped this block,
+            // silently dropping every queued entry at shutdown.
+            buffer.Clear();
+            while (reader.TryRead(out var entry))
+                buffer.Add(entry);
+            if (buffer.Count > 0)
+                await FlushBatchAsync(buffer);
 
-        buffer.Clear();
-        while (reader.TryRead(out var entry))
-            buffer.Add(entry);
-        if (buffer.Count > 0)
-            FlushBatch(buffer);
-
-        var dropped = Interlocked.Read(ref _droppedCount);
-        _logger.LogDebug("AuditLogBuffer consumer exiting (cancellation token fired, {Dropped} entries dropped)", dropped);
+            var dropped = Interlocked.Read(ref _droppedCount);
+            _logger.LogDebug("AuditLogBuffer consumer exiting (cancellation token fired, {Dropped} entries dropped)", dropped);
+        }
     }
 
-    private void FlushBatch(List<AuditLogEntry> batch)
+    private async Task FlushBatchAsync(List<AuditLogEntry> batch)
     {
         if (_auditSink != null)
         {
+            // BUG-138: await the sink so asynchronous write failures are
+            // observed and logged instead of becoming unobserved task faults.
             try
             {
-                _ = _auditSink.WriteBatchAsync(batch, CancellationToken.None);
+                await _auditSink.WriteBatchAsync(batch, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -124,8 +139,8 @@ internal sealed class AuditLogBuffer : IDisposable
             try
             {
                 var level = entry.StatusCode >= 500 ? _errorLevel
-                           : entry.StatusCode >= 400 ? _warningLevel
-                           : _successLevel;
+                          : entry.StatusCode >= 400 ? _warningLevel
+                          : _successLevel;
 
                 if (!_logger.IsEnabled(level))
                     continue;
@@ -155,6 +170,15 @@ internal sealed class AuditLogBuffer : IDisposable
         if (_disposed) return;
         _disposed = true;
         _cts.Cancel();
+        // Wait (bounded) for the consumer so the drain in ConsumeAsync's
+        // finally has a chance to complete before the CTS is disposed.
+        try
+        {
+            _consumerTask.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (AggregateException)
+        {
+        }
         _cts.Dispose();
     }
 }

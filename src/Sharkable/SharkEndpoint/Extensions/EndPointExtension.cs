@@ -12,7 +12,6 @@ using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-
 namespace Sharkable;
 
 internal static class SharkEndPointExtension
@@ -33,7 +32,10 @@ internal static class SharkEndPointExtension
         ArgumentNullException.ThrowIfNull(app);
 
         var endpointServices = app.Services.GetServices<ISharkEndpoint>();
-        var options = app.Services.GetService<IOptions<SharkOption>>();
+        // BUG-126: read from the single static options instance (the DI copy
+        // was removed) so Format/ApiPrefix/RequireAuthenticatedByDefault can
+        // never diverge from what the middleware sees.
+        var options = Shark.SharkOption;
         ArgumentNullException.ThrowIfNull(options);
 
         // Phase 1: Collect all SharkEndpoint instances with metadata
@@ -49,7 +51,7 @@ internal static class SharkEndPointExtension
             }
             else
             {
-                sharkEndpoint = CreateSharkEndpoint(e);
+                sharkEndpoint = CreateSharkEndpoint(e, options.ApiPrefix);
             }
 
             var groupAttr = e.GetType().GetCustomAttribute<EndpointGroupAttribute>();
@@ -64,10 +66,12 @@ internal static class SharkEndPointExtension
                 sharkEndpoint.version = versionAttr.Version;
             }
 
-            sharkEndpoint.version ??= options.Value.DefaultApiVersion;
+            sharkEndpoint.version ??= options.DefaultApiVersion;
 
-            if (string.IsNullOrWhiteSpace(sharkEndpoint.apiPrefix))
-                sharkEndpoint.apiPrefix = options.Value.ApiPrefix;
+            // Only fill the default prefix when it was never set at all —
+            // an explicit empty string (legacy [SharkEndpoint(ApiPrefix: null)])
+            // must NOT be replaced with the configured default.
+            sharkEndpoint.apiPrefix ??= options.ApiPrefix;
 
             collected.Add((sharkEndpoint, e.GetType()));
         });
@@ -76,30 +80,27 @@ internal static class SharkEndPointExtension
         var grouped = new Dictionary<string, List<(SharkEndpoint, Type)>>();
         collected.MyForEach(item =>
         {
-            var version = item.endpoint.version?.GetCaseFormat(options.Value.Format);
-            var groupName = item.endpoint.groupName?.GetCaseFormat(options.Value.Format) ?? string.Empty;
+            var version = item.endpoint.version?.GetCaseFormat(options.Format);
+            var groupName = item.endpoint.groupName?.GetCaseFormat(options.Format) ?? string.Empty;
             var key = string.IsNullOrWhiteSpace(version) ? groupName : $"{version}_{groupName}";
             if (!grouped.ContainsKey(key))
                 grouped[key] = [];
             grouped[key].Add(item);
         });
 
-        // Phase 3: One MapGroup per unique group name
+        // Phase 3: One MapGroup per unique group name. Every endpoint routes
+        // through a group — even with an empty apiPrefix — so the shared
+        // filters (auto-wrap, validation, API key, authz interceptor) and
+        // conventions always apply (BUG-105).
         foreach (var (groupName, endpoints) in grouped)
         {
             var first = endpoints.First().Item1;
 
-            if (string.IsNullOrWhiteSpace(first.apiPrefix))
-            {
-                endpoints.MyForEach(ep => ep.Item1.BuildAction?.Invoke(app));
-                continue;
-            }
-
-            var version = first.version?.GetCaseFormat(options.Value.Format);
-            var basePath = first.apiPrefix;
+            var version = first.version?.GetCaseFormat(options.Format);
+            var basePath = first.apiPrefix ?? string.Empty;
             if (!string.IsNullOrWhiteSpace(version))
                 basePath = $"{basePath}/{version}";
-            var groupNameForUrl = first.groupName?.GetCaseFormat(options.Value.Format) ?? string.Empty;
+            var groupNameForUrl = first.groupName?.GetCaseFormat(options.Format) ?? string.Empty;
             if (!string.IsNullOrWhiteSpace(groupNameForUrl))
                 basePath = $"{basePath}/{groupNameForUrl}";
 
@@ -145,7 +146,7 @@ internal static class SharkEndPointExtension
             ((IEndpointConventionBuilder)group).Add(builder =>
             {
                 // Apply route pattern formatting based on SharkOption.Format
-                var routeFormat = options.Value.Format;
+                var routeFormat = options.Format;
                 if (routeFormat != EndpointFormat.UnChanged && builder is RouteEndpointBuilder routeBuilder)
                 {
                     var rawText = routeBuilder.RoutePattern?.RawText;
@@ -173,7 +174,7 @@ internal static class SharkEndPointExtension
                 }
 
                 // Auto-RequireAuthorization when RequireAuthenticatedByDefault is enabled
-                if (options.Value.RequireAuthenticatedByDefault
+                if (options.RequireAuthenticatedByDefault
                     && !builder.Metadata.Any(m => m is IAuthorizeData or IAllowAnonymous))
                 {
                     builder.Metadata.Add(new AuthorizeAttribute());
@@ -223,26 +224,28 @@ internal static class SharkEndPointExtension
             });
 
             // Per-endpoint-class routing: AutoCrud (generated before user routes)
-            // and user-defined AddRoutes. Classes with [SharkDontWrap] route
-            // through a nested group so the auto-wrap filter does not apply.
+            // and user-defined AddRoutes. Class-level opt-outs are expressed as
+            // endpoint metadata — ASP.NET Core nested groups inherit parent-group
+            // filters, so a MapGroup("") subgroup cannot exclude them (BUG-106).
             var crudGenerator = app.Services.GetService<IAutoCrudGenerator>();
-            var crudLogger = crudGenerator != null
-                ? app.Services.GetService<ILoggerFactory>()?.CreateLogger("Sharkable.AutoCrud")
-                : null;
             foreach (var (endpoint, classType) in endpoints)
             {
-                var hasDontWrap = autoWrap && classType.GetCustomAttribute<SharkDontWrapAttribute>() != null;
-                var hasNoIdempotency = classType.GetCustomAttribute<SharkNoIdempotencyAttribute>() != null;
-                var hasIdempotent = classType.GetCustomAttribute<SharkIdempotentAttribute>();
-                var needsSubGroup = hasDontWrap || hasNoIdempotency;
-                var targetGroup = needsSubGroup ? group.MapGroup("") : group;
-                if (hasNoIdempotency)
-                    targetGroup.WithMetadata(new NoIdempotencyMetadata());
-                if (hasIdempotent != null)
-                    targetGroup.WithMetadata(new SharkIdempotentMetadata(hasIdempotent.TtlSeconds));
+                // Class-level opt-outs are expressed as endpoint metadata on a
+                // per-class subgroup so they never leak to sibling classes that
+                // share the same [EndpointGroup] (BUG-106/audit nit). The
+                // subgroup inherits the parent group's filters — that is
+                // intended; the metadata is what opts a class out.
+                var classGroup = group.MapGroup("");
+                if (autoWrap && classType.GetCustomAttribute<SharkDontWrapAttribute>() != null)
+                    classGroup.WithMetadata(new DisableAutoWrapMetadata());
+                if (classType.GetCustomAttribute<SharkNoIdempotencyAttribute>() != null)
+                    classGroup.WithMetadata(new NoIdempotencyMetadata());
+                var idempotent = classType.GetCustomAttribute<SharkIdempotentAttribute>();
+                if (idempotent != null)
+                    classGroup.WithMetadata(new SharkIdempotentMetadata(idempotent.TtlSeconds));
 
                 // User-defined endpoint convention
-                Shark.SharkOption.EndpointConvention?.Invoke(targetGroup, classType);
+                Shark.SharkOption.EndpointConvention?.Invoke(classGroup, classType);
 
                 if (crudGenerator != null)
                 {
@@ -251,37 +254,17 @@ internal static class SharkEndPointExtension
                     if (entityInterface != null)
                     {
                         var entityType = entityInterface.GetGenericArguments()[0];
-                        var operations = CrudOperations.All;
-                        try
-                        {
-                            if (Activator.CreateInstance(classType) is IAutoCrudEntityMarker marker)
-                                operations = marker.GetOperations();
-                        }
-                        catch (TypeLoadException ex)
-                        {
-                            crudLogger?.LogDebug(ex,
-                                "Endpoint type {Type} does not implement IAutoCrudEntityMarker (missing dependency); using CrudOperations.All",
-                                classType.FullName);
-                        }
-                        catch (TargetInvocationException ex) when (ex.InnerException is not null)
-                        {
-                            crudLogger?.LogWarning(ex.InnerException,
-                                "AutoCrud marker construction for {Type} threw; falling back to CrudOperations.All",
-                                classType.FullName);
-                        }
-                        catch (MissingMethodException ex)
-                        {
-                            crudLogger?.LogWarning(ex,
-                                "AutoCrud marker type {Type} has no public parameterless constructor; falling back to CrudOperations.All",
-                                classType.FullName);
-                        }
+                        // BUG-132: reuse the DI-resolved instance instead of
+                        // Activator.CreateInstance — no constructor side effects,
+                        // no AOT trim risk.
+                        var operations = (endpoint as IAutoCrudEntityMarker)?.GetOperations() ?? CrudOperations.All;
 
-                        crudGenerator.GenerateRoutes(targetGroup, entityType, classType, operations);
+                        crudGenerator.GenerateRoutes(classGroup, entityType, classType, operations);
                     }
                 }
 
                 // Add user-defined routes (after AutoCrud so overrides take precedence)
-                endpoint.BuildAction?.Invoke(targetGroup);
+                endpoint.BuildAction?.Invoke(classGroup);
             }
         }
 
@@ -404,21 +387,30 @@ internal static class SharkEndPointExtension
         {
             instance.groupName = sharkAttribute.Group;
             instance.version = sharkAttribute.Version;
+            // BUG-131/145: honor the attribute's prefix contract. Explicit
+            // ApiPrefix: null omits the prefix entirely; an explicit non-empty
+            // value wins; otherwise fall back to the configured default.
             if (string.IsNullOrWhiteSpace(sharkAttribute.ApiPrefix))
-                instance.addPrefix = false;
+            {
+                instance.apiPrefix = string.Empty;
+            }
+            else
+            {
+                instance.apiPrefix = sharkAttribute.ApiPrefix;
+            }
         }
         else
         {
             // Directly set fields using known properties or methods
             instance.groupName = shark.GetType().Name.FormatAsGroupName();
-            instance.addPrefix = !string.IsNullOrWhiteSpace(apiPrefix);
+            instance.apiPrefix = apiPrefix;
         }
 
         var endpointGroupAttr = shark.GetType().GetCustomAttribute<EndpointGroupAttribute>();
         if (endpointGroupAttr != null)
         {
             instance.groupName = endpointGroupAttr.Name;
-            instance.addPrefix = !string.IsNullOrWhiteSpace(apiPrefix);
+            instance.apiPrefix = apiPrefix;
         }
 
         var versionAttr = shark.GetType().GetCustomAttribute<SharkVersionAttribute>();
@@ -427,7 +419,6 @@ internal static class SharkEndPointExtension
             instance.version = versionAttr.Version;
         }
 
-        instance.apiPrefix = apiPrefix;
         // Assign the delegate
         instance.BuildAction = shark.AddRoutes;
 

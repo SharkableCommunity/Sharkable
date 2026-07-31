@@ -1,5 +1,7 @@
 ﻿#pragma warning disable CS0618 // Internal use of legacy attribute-based endpoint system
 
+using Microsoft.Extensions.DependencyInjection.Extensions;
+
 namespace Sharkable;
 
 internal static class DependencyInjectionExtension
@@ -8,6 +10,8 @@ internal static class DependencyInjectionExtension
     {
         services.AddSingleton<IDependencyReflectorFactory, DependencyReflectorFactory>();
 #pragma warning restore CS0618
-        services.AddSingleton<IUnifiedResultFactory, DefaultUnifiedResultFactory>();
+        // BUG-124: TryAdd so a user-registered IUnifiedResultFactory (before
+        // AddShark) wins instead of being shadowed by the framework default.
+        services.TryAddSingleton<IUnifiedResultFactory, DefaultUnifiedResultFactory>();
     }
 }

@@ -9,12 +9,13 @@ namespace Sharkable;
 /// similar.
 ///
 /// The cache is size-limited via <see cref="SharkIdempotencyOptions.MaxEntries"/>
-/// (default 10,000) so an attacker sending random unique
-/// <c>Idempotency-Key</c> headers cannot exhaust process memory.
+/// (default 10,000 distinct entries) so an attacker sending random unique
+/// <c>Idempotency-Key</c> headers cannot exhaust process memory. Each entry
+/// counts as one size unit; the per-response byte cap is enforced separately
+/// by <see cref="SharkIdempotencyOptions.MaxResponseSize"/>.
 /// </summary>
 public sealed class MemoryIdempotencyStore : IIdempotencyStore, IDisposable
 {
-    private const int MarkerSize = 256;
     private readonly MemoryCache _cache;
     private readonly object _reservationLock = new();
     private bool _disposed;
@@ -43,7 +44,7 @@ public sealed class MemoryIdempotencyStore : IIdempotencyStore, IDisposable
             var marker = new InFlightMarker();
             var actual = _cache.GetOrCreate<object>(key, entry =>
             {
-                entry.Size = MarkerSize;
+                entry.Size = 1;
                 entry.AbsoluteExpirationRelativeToNow = inFlightTtl;
                 return marker;
             });
@@ -71,7 +72,7 @@ public sealed class MemoryIdempotencyStore : IIdempotencyStore, IDisposable
     {
         if (_disposed) return Task.CompletedTask;
         using var entry = _cache.CreateEntry(key);
-        entry.Size = record.Body.Length + MarkerSize;
+        entry.Size = 1;
         entry.AbsoluteExpirationRelativeToNow = ttl;
         entry.Value = record;
         return Task.CompletedTask;

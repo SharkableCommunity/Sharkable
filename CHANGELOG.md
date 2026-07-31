@@ -2,6 +2,44 @@
 
 All notable changes to Sharkable are documented here.
 
+## [Unreleased]
+
+### fix
+- Idempotency: fingerprint is now computed from a buffered request body **before** the handler runs, so replaying a body-carrying request returns the cached response instead of a spurious `422 idempotency_key_conflict` (BUG-101).
+- Idempotency: first-execution responses were delivered with an empty body (buffer position not reset before forwarding) — now forwarded correctly (BUG-102).
+- Idempotency/rate limiting: `MaxEntries` on both memory stores now counts entries (was a byte budget, silently capping at ~39 keys / ~390 keys respectively) (BUG-107/109).
+- Idempotency: request path hashing now uses UTF-8 instead of ASCII so non-ASCII paths cannot collide (BUG-108).
+- Cron: `*/0` / `N/0` steps throw `FormatException` instead of hanging the host in an infinite loop; range-less steps (`5/10`) parse correctly (BUG-103).
+- Cron: `GetNext` re-aligns to the seconds field on every minute boundary — fixed-second patterns (e.g. `30 * * * * *`) now fire on the correct second; never-matching patterns are memoized so the scheduler no longer burns ~2.1M iterations per tick (BUG-104).
+- Cron: week field accepts `7` (Sunday) (BUG-144); `TriggerAsync` honors `SkipIfRunning`, observes failures and is cancelled on shutdown (BUG-128); scheduler loop backs off exponentially on persistent store errors (BUG-129); dead no-op loop removed (BUG-143).
+- Endpoints: an empty `ApiPrefix` no longer bypasses the shared group filters (auto-wrap, validation, API-key, authorization interceptor) (BUG-105).
+- Endpoints: `[SharkDontWrap]` now actually disables auto-wrap via endpoint metadata (nested groups inherit parent filters, so the previous subgroup approach was ineffective) (BUG-106).
+- Endpoints: legacy `[SharkEndpoint(ApiPrefix: null)]` omits the prefix as documented; explicit custom prefixes are honored; old-style endpoints now respect `SharkOption.ApiPrefix`; dead `addPrefix`/`baseApiPath` fields removed (BUG-131/145).
+- Endpoints: AutoCrud operations are read from the DI-resolved endpoint instance instead of `Activator.CreateInstance` (BUG-132).
+- Middleware order: the rate limiter now runs **after** authentication (per-user key partitioning works) and the audit trail runs **before** the rate limiter (throttled requests are audited) (BUG-110/111).
+- Audit: `AuditLogBuffer` drains queued entries on shutdown even when cancellation lands inside the wait; sink writes are awaited so async failures are logged; `Dispose` waits for the consumer (BUG-112/138).
+- ETag: no longer throws on streamed/flushed responses (`HasStarted` guard), never overwrites an endpoint-set `Cache-Control`, and skips `text/event-stream` responses (BUG-113).
+- Cache profile filter: `HasStarted` guard + no `Cache-Control` overwrite (BUG-114).
+- Saga: compensation uses a fresh timeout per step (one slow step can no longer starve the remaining rollback) and failed compensation keeps persisted progress instead of deleting crash-recovery state (BUG-115/116).
+- Warmup: timeout/failure now cancels sibling warmup tasks before disposing their CTSs and rethrows the inner exception (BUG-117).
+- Validation: validators are resolved via a registration-time index instead of `MakeGenericType` on the request path; validation error responses serialize through the source-generated JSON context (AOT-safe) (BUG-118/119).
+- AutoCrud: loud startup warning when the companion assembly cannot be loaded instead of silent no-op; `[RequiresDynamicCode]` annotation (BUG-120).
+- OpenAPI: `[SharkOpenApiIgnore]` stripping now traverses `JsonTypeInfo` (AOT-safe) and actually removes required entries (dead ternary removed) (BUG-121).
+- OpenAPI: auto-wrap document transformer now follows the effective `UseSharkOptions ?? SharkOption` flag, skips `[SharkDontWrap]`/`.DisableAutoWrap()` operations, and wraps `$ref` response schemas (BUG-130).
+- Health: JWT authority check skips probing for non-HTTP(S) authorities (self-issued JWTs no longer make `/healthz` permanently unhealthy) and disposes the response (BUG-122/123).
+- DI: `IUnifiedResultFactory` is registered with `TryAdd` and `ResolveFactory` consults DI, so user-registered factories win; attribute/marker DI no longer registers framework interfaces (`IDisposable`, `System.*`, `Microsoft.*`) (BUG-124/125).
+- Options: removed the second `services.Configure<SharkOption>` registration that re-invoked the user's setup callback on a divergent instance — all framework reads now use the single static options object (BUG-126).
+- Multi-tenant: apex domains are no longer treated as tenant subdomains (BUG-127).
+- API-key validator reads from the static options instance (single source of truth) with reference-based cache refresh (BUG-126 follow-up).
+- Unified results: `AsCreated` without a URI returns 201 (was 200); `AsUnauthorized`/`AsForbidden` emit the unified error envelope; every errors-only helper honors a custom status code (BUG-134/135/146).
+- Profiler endpoint reuses the shared `ApiKeyValidator` instead of re-hashing keys per request (BUG-139).
+- `SharkBackgroundService` health check no longer exposes full exception stack traces via `/healthz` (BUG-137).
+- `AdaptiveLimitMonitor` registered via factory so the container disposes it (BUG-136).
+- `AssemblyContext` refreshes its assembly set on repeated `AddShark` calls; added correctly-spelled `Shark.SetAssembly` (BUG-140/141).
+- `SharkOption.WarmupTimeout` is now public (BUG-142).
+- NativeTest: pinned `SQLitePCLRaw.lib.e_sqlite3` 2.1.12 (fixes high-severity advisory GHSA-2m69-gcr7-jv3q); uses `AppContext.BaseDirectory` instead of `Assembly.Location` (IL3000).
+- NativeAOT: the framework's internal endpoints (/healthz, /livez, /_sharkable/jobs, /_sharkable/profiler) no longer return `Task<IResult>`/anonymous types — they write responses directly via `HttpContext` with explicit source-generated `JsonTypeInfo`, so the app now starts and serves under NativeAOT (previously it crashed at startup). `UnifiedResultSourceContext` gained the corresponding `[JsonSerializable]` declarations (AOT follow-up findings).
+
 ## [0.7.4] — 2026-07-18
 
 ### fix

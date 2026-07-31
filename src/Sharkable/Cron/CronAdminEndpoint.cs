@@ -8,29 +8,50 @@ internal static class CronAdminEndpoint
 
     internal static void Map(IEndpointRouteBuilder app)
     {
-        app.MapGet("/_sharkable/jobs", async (ICronScheduler scheduler, HttpContext context, ApiKeyValidator validator) =>
+        // AOT: write the response directly through HttpContext instead of
+        // returning an IResult — the request delegate factory cannot compile
+        // Task<IResult>/Results<,> handlers under NativeAOT. The explicit
+        // JsonTypeInfo keeps serialization source-generated (AOT-safe).
+        app.MapGet("/_sharkable/jobs", async (HttpContext context, ICronScheduler scheduler, ApiKeyValidator validator) =>
         {
             if (Shark.SharkOption.CronAdminRequireApiKey && !IsApiKeyAuthorized(context, validator))
-                return Results.NotFound();
+            {
+                context.Response.StatusCode = 404;
+                return;
+            }
 
             var list = await scheduler.ListAsync();
-            return Results.Ok(list.Select(RedactState));
+            await context.Response.WriteAsJsonAsync(
+                list.Select(CronJobView.From),
+                UnifiedResultSourceContext.Default.IEnumerableCronJobView);
         }).ExcludeFromDescription();
     }
 
-    private static object RedactState(CronJobState s) => new
+    /// <summary>AOT-safe named projection of <see cref="CronJobState"/>.</summary>
+    internal sealed record CronJobView(
+        string Name,
+        string? Description,
+        string Cron,
+        bool IsRunning,
+        DateTimeOffset? NextRun,
+        DateTimeOffset? LastRun,
+        long? LastDurationMs,
+        string? LastError,
+        long RunCount,
+        bool Paused)
     {
-        s.Name,
-        s.Description,
-        s.Cron,
-        s.IsRunning,
-        s.NextRun,
-        s.LastRun,
-        s.LastDurationMs,
-        LastError = TruncateLastError(s.LastError),
-        s.RunCount,
-        s.Paused,
-    };
+        public static CronJobView From(CronJobState s) => new(
+            s.Name,
+            s.Description,
+            s.Cron,
+            s.IsRunning,
+            s.NextRun,
+            s.LastRun,
+            s.LastDurationMs,
+            TruncateLastError(s.LastError),
+            s.RunCount,
+            s.Paused);
+    }
 
     private static string? TruncateLastError(string? value)
     {

@@ -71,22 +71,22 @@ public abstract class SharkBackgroundService : BackgroundService, IHealthCheck
                 {
                     break;
                 }
-catch (Exception ex)
-            {
-                // SHARK-SEC-L024: preserve the full stack trace for the
-                // LastError so operators can diagnose failures without
-                // attaching a debugger. Previously LastError was set to
-                // ex.Message, which discards the inner exception (the
-                // actual cause for 9 out of 10 wrapper-style exceptions
-                // such as TargetInvocationException, AggregateException,
-                // etc.).
-                LastError = ex.ToString();
-                if (attempt < _maxRetries)
+                catch (Exception ex)
                 {
-                    try { await Task.Delay(_retryDelay, stoppingToken); }
-                    catch (OperationCanceledException) { break; }
+                    // SHARK-SEC-L024: preserve the full stack trace for the
+                    // LastError so operators can diagnose failures without
+                    // attaching a debugger. Previously LastError was set to
+                    // ex.Message, which discards the inner exception (the
+                    // actual cause for 9 out of 10 wrapper-style exceptions
+                    // such as TargetInvocationException, AggregateException,
+                    // etc.).
+                    LastError = ex.ToString();
+                    if (attempt < _maxRetries)
+                    {
+                        try { await Task.Delay(_retryDelay, stoppingToken); }
+                        catch (OperationCanceledException) { break; }
+                    }
                 }
-            }
             }
 
             LastRunAt = DateTimeOffset.UtcNow;
@@ -110,7 +110,10 @@ catch (Exception ex)
         {
             BackgroundServiceStatus.Running => HealthCheckResult.Healthy("Running"),
             BackgroundServiceStatus.Idle => HealthCheckResult.Healthy("Idle"),
-            BackgroundServiceStatus.Failed => HealthCheckResult.Unhealthy($"Failed: {LastError}"),
+            // BUG-137: never surface the full exception (stack trace, file
+            // paths) to anonymous /healthz callers — keep the detailed error
+            // on the LastError property and in logs only.
+            BackgroundServiceStatus.Failed => HealthCheckResult.Unhealthy("Background service failed"),
             BackgroundServiceStatus.Stopped => HealthCheckResult.Unhealthy("Stopped"),
             _ => HealthCheckResult.Healthy(),
         });

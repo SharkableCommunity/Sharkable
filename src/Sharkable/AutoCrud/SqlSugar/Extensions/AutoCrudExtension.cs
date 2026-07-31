@@ -3,6 +3,12 @@ namespace Sharkable;
 
 internal static class AutoCrudExtension
 {
+    /// <summary>
+    /// Wires the SqlSugar AutoCrud generator when <c>ConfigureAutoCrud</c> is set.
+    /// The generator lives in the companion <c>Sharkable.AutoCrud.SqlSugar</c>
+    /// assembly, loaded lazily via reflection.
+    /// </summary>
+    [RequiresDynamicCode("AutoCrud loads the Sharkable.AutoCrud.SqlSugar companion assembly via reflection and is not supported under NativeAOT")]
     internal static IServiceCollection AddAutoCrud(this IServiceCollection services)
     {
         //only proceed when AutoCrud is configured
@@ -24,7 +30,12 @@ internal static class AutoCrudExtension
             }
             catch
             {
-                Utils.WriteDebug("no auto crud generation service added (assembly not found).");
+                // BUG-120: warn loudly instead of silently disabling AutoCrud.
+                // (Do not throw — NativeAOT publishes legitimately run without
+                // the companion assembly; a loud warning keeps that visible.)
+                Console.Error.WriteLine(
+                    "[Sharkable] WARNING: ConfigureAutoCrud was set but the 'Sharkable.AutoCrud.SqlSugar' assembly could not be loaded. " +
+                    "Add a PackageReference to Sharkable.AutoCrud.SqlSugar. Note: AutoCrud is not supported under NativeAOT.");
                 return services;
             }
         }
@@ -41,7 +52,9 @@ internal static class AutoCrudExtension
                 return s;
             }
         }
-        Utils.WriteDebug("no auto crud generation service added.");
+        Console.Error.WriteLine(
+            "[Sharkable] WARNING: ConfigureAutoCrud was set but the 'Sharkable.AutoCrud.SqlSugar.AutoCrudExtension.AddSqlSugar' method could not be located. " +
+            "Verify the Sharkable.AutoCrud.SqlSugar package version is compatible with this Sharkable version.");
         return services;
     }
 }

@@ -27,5 +27,8 @@
 
     <ItemGroup>
       <PackageReference Include="SqlSugarCore" Version="5.1.4.216" />
+      <!-- BUG-133: SqlSugarCore pulls SQLitePCLRaw.lib.e_sqlite3 2.1.11 which has
+           known high-severity advisory GHSA-2m69-gcr7-jv3q. Pin the patched 2.1.12. -->
+      <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.12" />
     </ItemGroup>
 </Project>

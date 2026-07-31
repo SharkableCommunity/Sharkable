@@ -51,7 +51,14 @@ public sealed partial class Shark
     }
 
     /// <summary>Sets the assemblies registered with Sharkable. Called during <c>AddShark()</c>.</summary>
+    /// <remarks>Legacy spelling retained for binary compatibility — prefer <see cref="SetAssembly"/>.</remarks>
     public static void SetAssebly(Assembly[]? assemblies)
+    {
+        SetAssembly(assemblies);
+    }
+
+    /// <summary>Sets the assemblies registered with Sharkable. Called during <c>AddShark()</c>.</summary>
+    public static void SetAssembly(Assembly[]? assemblies)
     {
         AssemblyContext.GetAssemblyContext(assemblies);
     }

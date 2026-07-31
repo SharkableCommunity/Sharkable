@@ -26,7 +26,13 @@ public sealed class AssemblyContext
     {
         lock(locker)
         {
-            Instance ??= new AssemblyContext(assemblies);
+            if (Instance == null)
+                Instance = new AssemblyContext(assemblies);
+            else
+                // BUG-140: a second AddShark/host in the same process must
+                // observe the new assembly set — previously the parameter was
+                // silently ignored once the singleton existed.
+                Instance.InternalAssemblies = assemblies;
             return Instance;
         }
     }

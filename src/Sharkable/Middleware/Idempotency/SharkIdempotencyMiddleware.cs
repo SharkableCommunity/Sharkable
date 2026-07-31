@@ -123,6 +123,14 @@ internal sealed class SharkIdempotencyMiddleware
             return;
         }
 
+        // 5a. Compute the fingerprint BEFORE executing the handler, from a
+        // buffered (rewound) request body. The stored record must match what
+        // a replay will compute — the previous implementation hashed the body
+        // after _next() had already consumed it (Kestrel's request stream is
+        // not seekable), so every replay of a body-carrying request mismatched
+        // and returned 422 idempotency_key_conflict (BUG-101).
+        var storedFingerprint = await ComputeFingerprint(context);
+
         // 6. Execute downstream with response buffering.
         // SHARK-SEC-M008: use a counting stream wrapper around a bounded
         // MemoryStream so the peak allocation is capped at MaxResponseSize
@@ -177,11 +185,15 @@ internal sealed class SharkIdempotencyMiddleware
             var bytes = segment.Count == segment.Array!.Length
                 ? segment.Array
                 : segment.ToArray();
+            // BUG-102: reset the position first — CopyToAsync starts from the
+            // current position and the buffer was left at the end of the
+            // written response, which delivered an empty body to the caller.
+            buffer.Position = 0;
             await buffer.CopyToAsync(originalBody);
 
             var record = new IdempotencyRecord(
                 key,
-                await ComputeFingerprint(context),
+                storedFingerprint,
                 context.Response.StatusCode,
                 context.Response.ContentType ?? "application/octet-stream",
                 bytes,
@@ -231,20 +243,39 @@ internal sealed class SharkIdempotencyMiddleware
         // hash, ensuring chunked requests never collide with one another (different
         // bodies → different fingerprints) or with the empty-body path.
         var body = context.Request.Body;
-        if (body.CanSeek) body.Position = 0;
+        if (!body.CanSeek)
+        {
+            // BUG-101: Kestrel's request stream is not seekable and the endpoint
+            // consumes it. Buffer the body (bounded by MaxFingerprintBodySize, the
+            // same cap the hash uses) so the fingerprint covers the actual payload
+            // and the endpoint can still re-read it from the start afterwards.
+            context.Request.EnableBuffering(_options.MaxFingerprintBodySize);
+            body = context.Request.Body;
+        }
+
+        body.Position = 0;
 
         var bytesToHash = maxBodySize;
         var hashContentLength = contentLength ?? -1;
         if (contentLength is not null && contentLength.Value < bytesToHash)
             bytesToHash = (int)contentLength.Value;
 
-        return await IdempotencyFingerprint.ComputeAsync(
-            userId,
-            context.Request.Method,
-            context.Request.Path,
-            body,
-            bytesToHash,
-            hashContentLength);
+        try
+        {
+            return await IdempotencyFingerprint.ComputeAsync(
+                userId,
+                context.Request.Method,
+                context.Request.Path,
+                body,
+                bytesToHash,
+                hashContentLength);
+        }
+        finally
+        {
+            // Rewind so downstream model binding reads the body from the start.
+            if (body.CanSeek)
+                body.Position = 0;
+        }
     }
 
     private async Task Replay(HttpContext context, IdempotencyRecord record)

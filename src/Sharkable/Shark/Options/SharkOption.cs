@@ -9,7 +9,12 @@ namespace Sharkable;
 /// </summary>
 public sealed class SharkOption : ISharkOption
 {
-    /// <summary>Default section name used when binding from <c>appsettings.json</c>.</summary>
+    /// <summary>
+    /// Reserved section name. Sharkable options are currently configured
+    /// exclusively via the <c>AddShark(opt => ...)</c> callback — appsettings.json
+    /// binding is not yet implemented (BUG-126); this constant is reserved for
+    /// future configuration binding.
+    /// </summary>
     public const string Default = "Sharkable";
     /// <summary>
     /// API prefix for all endpoint groups. Default is <c>"api"</c>.
@@ -640,8 +645,9 @@ public sealed class SharkOption : ISharkOption
 
     /// <summary>
     /// Timeout for warmup execution. Default is 30 seconds.
+    /// BUG-142: made public so users can tune the warmup deadline.
     /// </summary>
-    internal TimeSpan WarmupTimeout { get; set; } = TimeSpan.FromSeconds(30);
+    public TimeSpan WarmupTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Registers a service type to be validated at startup.

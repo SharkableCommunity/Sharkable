@@ -1,4 +1,5 @@
 
+using System.Collections.Concurrent;
 using FluentValidation;
 
 namespace Sharkable;
@@ -42,10 +43,32 @@ internal static class ValidationExtension
                     {
                         Utils.WriteDebug($"registering validator: {iface.Name} -> {type.Name}");
                         services.AddSingleton(iface, type);
+                        // BUG-118: index argType → validator interface so the
+                        // runtime filter resolves validators without
+                        // MakeGenericType on the request path.
+                        ValidatorRegistry.Register(iface.GetGenericArguments()[0], iface);
                         break;
                     }
                 }
             }
         }
     }
+}
+
+/// <summary>
+/// Registration-time index of validator interface types, built by
+/// <see cref="ValidationExtension.AddValidators"/> and consumed by
+/// <see cref="ValidationFilter"/> to resolve validators AOT-safely.
+/// </summary>
+internal static class ValidatorRegistry
+{
+    private static readonly ConcurrentDictionary<Type, Type> Map = new();
+
+    /// <summary>Records the closed <c>IValidator&lt;T&gt;</c> interface for an argument type.</summary>
+    public static void Register(Type argType, Type validatorInterface)
+        => Map[argType] = validatorInterface;
+
+    /// <summary>Looks up the registered validator interface for an argument type.</summary>
+    public static bool TryGet(Type argType, out Type validatorInterface)
+        => Map.TryGetValue(argType, out validatorInterface!);
 }

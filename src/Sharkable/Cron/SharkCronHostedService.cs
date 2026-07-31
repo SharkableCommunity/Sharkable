@@ -25,10 +25,10 @@ internal sealed class SharkCronHostedService : BackgroundService
         var configureAction = Shark.SharkOption.ConfigureCronJobs;
         if (configureAction != null)
         {
-            foreach (var job in _scheduler.Jobs.ToList()) { } // force registration sync
             await configureAction(_scheduler);
         }
 
+        var consecutiveErrors = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -62,10 +62,21 @@ internal sealed class SharkCronHostedService : BackgroundService
                         }
                     }, jobCts.Token);
                 }
+
+                consecutiveErrors = 0;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Cron scheduler loop error");
+                // BUG-129: a persistent store outage previously logged once per
+                // second forever. Back off exponentially (up to 30 s) so the
+                // error volume stays bounded while the loop keeps retrying.
+                consecutiveErrors++;
+                var backoffSeconds = Math.Min(30, 1 << Math.Min(consecutiveErrors - 1, 5));
+                _logger.LogError(ex,
+                    "Cron scheduler loop error (attempt {Attempt}); retrying in {Delay}s",
+                    consecutiveErrors, backoffSeconds);
+                await Task.Delay(TimeSpan.FromSeconds(backoffSeconds), stoppingToken);
+                continue;
             }
 
             await Task.Delay(1000, stoppingToken);

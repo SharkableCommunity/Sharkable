@@ -37,7 +37,8 @@ builder.Services.AddShark([typeof(Program).Assembly], opt =>
     opt.ConfigureTracing(t => t.ServiceName = "sharkable-shop");
 
     // AutoCrud test — SQLite entity (absolute path)
-    var dbPath = Path.Combine(Path.GetDirectoryName(typeof(Program).Assembly.Location)!, "test.db");
+    // Use AppContext.BaseDirectory: Assembly.Location is empty in single-file/AOT apps (IL3000).
+    var dbPath = Path.Combine(AppContext.BaseDirectory, "test.db");
     opt.ConfigureAutoCrud(s =>
     {
         s.DbType = Sharkable.DbType.Sqlite;
