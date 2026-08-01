@@ -8,7 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Sharkable" Version="0.7.6" />
+    <PackageReference Include="Sharkable" Version="0.8.0" />
   </ItemGroup>
 
   <ItemGroup>

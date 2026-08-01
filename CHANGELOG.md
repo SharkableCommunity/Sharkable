@@ -2,7 +2,7 @@
 
 All notable changes to Sharkable are documented here.
 
-## [Unreleased]
+## [0.8.0] — 2026-08-01
 
 ### feat
 - SSE (Server-Sent Events) streaming: `Results.Extensions.Sse(handler)` with `SseEventWriter` (id/event/data/retry/comment fields, multi-line payloads, keep-alive) and `.SharkSse()` endpoint DSL that skips idempotency buffering and declares the `text/event-stream` response. AOT-safe (plain UTF-8 writes, no reflection).
