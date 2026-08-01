@@ -12,6 +12,13 @@ public class TestItem
 
     [CrudAllow]
     public string Name { get; set; } = "";
+
+    // DATA-04: tenant column — AutoCrud filters queries and force-fills writes
+    // when EnableAutoCrudTenantFilter is on. Not [CrudAllow]: the generator
+    // excludes it from client-controlled writes. Nullable so inserts succeed
+    // even when the tenant filter is disabled.
+    [SugarColumn(IsNullable = true)]
+    public string? TenantId { get; set; }
 }
 
 public class AutoCrudTestEndpoint : ISharkEndpoint, IAutoCrudEntity<TestItem>

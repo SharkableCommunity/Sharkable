@@ -329,6 +329,26 @@ public sealed class SharkOption : ISharkOption
     {
         SqlSugarOptionsConfigure = options;
     }
+
+    /// <summary>
+    /// Enables multi-tenant row isolation for AutoCrud endpoints (DATA-04).
+    /// When <c>true</c>, every AutoCrud query is filtered by the current tenant
+    /// (via <see cref="ITenant"/>) and writes fill/keep the tenant column, so a
+    /// tenant can never read or modify another tenant's rows. Requires the
+    /// multi-tenant middleware (<see cref="TenantOptions"/>) to be configured so
+    /// <see cref="ITenant.TenantId"/> is populated, and the entity's table must
+    /// contain the tenant column. Default: <c>false</c> (opt-in).
+    /// </summary>
+    public bool EnableAutoCrudTenantFilter { get; set; }
+
+    /// <summary>
+    /// Column name used for tenant filtering when
+    /// <see cref="EnableAutoCrudTenantFilter"/> is <c>true</c>. Default:
+    /// <c>"TenantId"</c>. Must be a valid SQL identifier (letters, digits and
+    /// underscore only, no quotes/spaces) — validated at endpoint generation time.
+    /// </summary>
+    public string AutoCrudTenantColumn { get; set; } = "TenantId";
+
     /// <summary>
     /// Configures the distributed rate limiter middleware. When set, a
     /// fixed-window rate limiter backed by <see cref="IDistributedRateLimitStore"/>

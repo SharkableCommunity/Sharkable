@@ -45,6 +45,10 @@ builder.Services.AddShark([typeof(Program).Assembly], opt =>
         s.ConnectionString = $"DataSource={dbPath}";
     });
 
+    // DATA-04: multi-tenant row isolation for AutoCrud — tenant from header
+    opt.EnableAutoCrudTenantFilter = true;
+    opt.ConfigureMultiTenant(t => t.ResolveTenant = ctx => ctx.Request.Headers["X-Tenant-Id"].ToString());
+
     // JWT — self-issued, no OIDC authority
     opt.ConfigureJwt(jwt =>
     {

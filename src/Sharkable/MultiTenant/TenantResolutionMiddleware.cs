@@ -15,7 +15,12 @@ internal sealed class TenantResolutionMiddleware
     {
         if (_options.ResolveTenant != null)
         {
-            tenant.TenantId = _options.ResolveTenant(context);
+            // Normalize: empty/whitespace tenant ids are indistinguishable from
+            // "no tenant" — treat them as unresolved so tenant-guarded features
+            // (e.g. AutoCrud tenant filter) reject the request instead of
+            // silently querying without a tenant scope.
+            var resolved = _options.ResolveTenant(context);
+            tenant.TenantId = string.IsNullOrWhiteSpace(resolved) ? null : resolved;
         }
         await _next(context);
     }
