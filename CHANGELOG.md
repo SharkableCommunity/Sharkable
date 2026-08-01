@@ -2,6 +2,14 @@
 
 All notable changes to Sharkable are documented here.
 
+## [Unreleased]
+
+### feat
+- SSE (Server-Sent Events) streaming: `Results.Extensions.Sse(handler)` with `SseEventWriter` (id/event/data/retry/comment fields, multi-line payloads, keep-alive) and `.SharkSse()` endpoint DSL that skips idempotency buffering and declares the `text/event-stream` response. AOT-safe (plain UTF-8 writes, no reflection).
+- Multi-tenant row isolation for AutoCrud (DATA-04): `SharkOption.EnableAutoCrudTenantFilter` + `AutoCrudTenantColumn` — every AutoCrud query is tenant-filtered, creates force-fill the tenant column server-side, the tenant column is excluded from client-controlled writes, and unresolved-tenant requests are rejected with 400 (no cross-tenant leakage). Companion package `Sharkable.AutoCrud.SqlSugar` implements the filtering.
+- Tenant resolution now normalizes empty/whitespace resolver results to "no tenant" so tenant-guarded features reject instead of silently querying unscoped.
+- `dotnet new sharkable-webapi` project template (DX-01): minimal API scaffold with `AddShark`/`UseShark`, auto-wrap, health checks, idempotency, an example `ISharkEndpoint`, source-generated JSON context, and a NativeAOT-ready `rd.xml`. Ships as the `Sharkable.Templates` package.
+
 ## [0.7.6] — 2026-08-01
 
 ### fix
