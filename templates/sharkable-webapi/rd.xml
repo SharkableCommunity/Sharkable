@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Directives>
+    <!--
+      Keeps all types in the app assembly so ISharkEndpoint discovery and
+      attribute-based DI registration survive NativeAOT trimming. Remove this
+      and prefer per-type annotations once you know your exact type graph.
+    -->
+    <Application>
+        <Assembly Name="SharkableWebApi" Dynamic="Required All">
+        </Assembly>
+    </Application>
+</Directives>
